@@ -58,6 +58,8 @@ W, H = 176, 56            # output image (columns x rows)
 FINGER_ON = 30.0          # ridge-energy thresholds (no finger ~5, finger ~85-120)
 FINGER_OFF = 12.0
 POLL = 0.08
+STILL_MAX = 8.0           # frame-to-frame ridge energy of a static, empty sensor (~5)
+RECALIBRATE_AFTER = 5.0   # seconds of static frames without a lift before re-baselining
 
 F_MSG, F_TLS, F_TLS_DATA = 0xA0, 0xB0, 0xB2
 C_NOP, C_IMG, C_FDT_MODE, C_CONFIG, C_RESET, C_OTP = 0x00, 0x20, 0x36, 0x90, 0xA2, 0xA6
@@ -204,6 +206,7 @@ class Sensor:
         else:
             log.warning("OTP calibration missing or invalid, using default config")
         self._handshake()
+        self.config = config
         if self.cmd(C_CONFIG, config)[0] != 1:
             raise IOError("config upload failed")
         self.cmd(C_DRV, b"\x01\x00", reply=False)
@@ -330,7 +333,7 @@ class Cancelled(Exception):
 class Bridge:
     def __init__(self):
         self.matcher = Matcher(STATE)
-        self.calib_path = os.path.join(STATE, "calib.npy")
+        self.calib_path = os.path.join(STATE, "calib.npz")
         self.sensor = None
         self.calib = None
         self.last_used = 0.0
@@ -346,14 +349,24 @@ class Bridge:
             self.release()
             raise
         frame = self.sensor.image()
-        stored = np.load(self.calib_path) if os.path.exists(self.calib_path) else None
-        if stored is not None and stored.shape == frame.shape:
-            self.calib = stored
-            if ridge_energy(frame - stored) < FINGER_OFF:
-                self.calib = frame
+        stored = None
+        try:
+            with np.load(self.calib_path) as z:
+                # A baseline is only valid for the exact config it was taken with.
+                if z["config"].tobytes() == self.sensor.config and z["calib"].shape == frame.shape:
+                    stored = z["calib"]
+        except (OSError, KeyError, ValueError):
+            pass
+        if stored is not None and ridge_energy(frame - stored) >= FINGER_OFF:
+            self.calib = stored              # probably a finger on the sensor right now
         else:
-            self.calib = frame               # first run: sensor must be untouched
-        np.save(self.calib_path, self.calib)
+            self.calib = frame
+        self.save_calib()
+
+    def save_calib(self):
+        tmp = self.calib_path + ".tmp.npz"
+        np.savez(tmp, calib=self.calib, config=np.frombuffer(self.sensor.config, np.uint8))
+        os.replace(tmp, self.calib_path)
 
     def release(self):
         if self.sensor:
@@ -370,10 +383,21 @@ class Bridge:
     def wait_touch(self, conn):
         """Wait for a finger that is placed after this call; return its 8-bit image."""
         lifted = False
+        prev, still_since = None, time.monotonic()
         while True:
             if peer_closed(conn):
                 raise Cancelled()
             img, e = self.frame()
+            # Recover from a stale baseline: no lift seen, yet the frames are static.
+            # A real finger is never this still for long; drop to the current frame.
+            if prev is None or ridge_energy(img - prev) > STILL_MAX:
+                still_since = time.monotonic()
+            prev = img
+            if not lifted and time.monotonic() - still_since > RECALIBRATE_AFTER:
+                log.info("static frames without a lift, recalibrating")
+                self.calib = img
+                self.save_calib()
+                e = 0.0
             if e < FINGER_OFF:
                 if not lifted:
                     lifted = True
@@ -449,7 +473,7 @@ class Bridge:
             self.match(conn, words[1:], identify=True)
         else:
             reply(conn, "ERROR unknown request")
-        np.save(self.calib_path, self.calib)
+        self.save_calib()
 
     def run(self):
         os.makedirs(os.path.dirname(SOCK), mode=0o700, exist_ok=True)
