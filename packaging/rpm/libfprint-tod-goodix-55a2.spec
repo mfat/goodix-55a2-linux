@@ -1,3 +1,5 @@
+%undefine _debugsource_packages
+
 Name:           libfprint-tod-goodix-55a2
 Version:        0.1.0
 Release:        1%{?dist}
