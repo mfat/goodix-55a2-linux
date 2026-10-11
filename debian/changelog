@@ -1,3 +1,10 @@
+libfprint-tod-goodix-55a2 (0.1.2) unstable; urgency=medium
+
+  * Tie the saved no-finger baseline to the chip config and recover from
+    stale baselines.
+
+ -- mFat <newmfat@gmail.com>  Sun, 11 Oct 2026 21:00:00 +0330
+
 libfprint-tod-goodix-55a2 (0.1.1) unstable; urgency=medium
 
   * Patch the chip config with per-sensor OTP calibration like the Windows
