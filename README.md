@@ -75,7 +75,7 @@ sudo dnf install libfprint-tod fprintd fprintd-pam \
 ## Install
 
 ```sh
-git clone https://github.com/<you>/goodix-55a2-linux
+git clone https://github.com/mfat/goodix-55a2-linux
 cd goodix-55a2-linux
 ./tod/build.sh
 sudo ./install.sh
