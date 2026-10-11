@@ -15,7 +15,7 @@ TODDIR      ?= $(shell $(PKG_CONFIG) --variable=tod_driversdir libfprint-2-tod-1
 
 # Override TOD_CFLAGS / TOD_LIBS when the -devel files are not installed.
 TOD_CFLAGS  ?= $(shell $(PKG_CONFIG) --cflags libfprint-2-tod-1 gio-unix-2.0)
-TOD_LIBS    ?= $(shell $(PKG_CONFIG) --libs libfprint-2-tod-1 gio-unix-2.0)
+TOD_LIBS    ?= $(shell $(PKG_CONFIG) --libs libfprint-2-tod-1 libfprint-2 gio-unix-2.0)
 
 CFLAGS      ?= -O2 -g
 CFLAGS      += -fPIC -Wall -Wno-unused-parameter
