@@ -1,0 +1,8 @@
+#!/bin/sh
+set -e
+
+#DEBHELPER#
+
+if [ "$1" = "configure" ] && [ -d /run/systemd/system ]; then
+    systemctl try-restart fprintd.service >/dev/null 2>&1 || true
+fi

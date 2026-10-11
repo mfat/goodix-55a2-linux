@@ -1,0 +1,89 @@
+name: Build packages
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: v
+        run: |
+          VERSION=$(cat VERSION)
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          if [ "${GITHUB_REF_TYPE}" = "tag" ] && [ "${GITHUB_REF_NAME}" != "v$VERSION" ]; then
+            echo "Tag ${GITHUB_REF_NAME} does not match VERSION $VERSION" >&2
+            exit 1
+          fi
+
+  rpm:
+    needs: version
+    runs-on: ubuntu-latest
+    container: fedora:44
+    steps:
+      - name: Install build dependencies
+        run: |
+          dnf install -y dnf-plugins-core git rpm-build rpmdevtools gcc make pkgconf glib2-devel systemd-rpm-macros
+          dnf copr enable -y grahamwhiteuk/libfprint-tod
+          dnf install -y libfprint-tod-devel
+      - uses: actions/checkout@v4
+      - name: Build RPM
+        run: |
+          VER=${{ needs.version.outputs.version }}
+          rpmdev-setuptree
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          git archive --format=tar.gz --prefix="goodix-55a2-linux-${VER}/" \
+            -o ~/rpmbuild/SOURCES/goodix-55a2-linux-${VER}.tar.gz HEAD
+          rpmbuild -ba packaging/rpm/libfprint-tod-goodix-55a2.spec
+          mkdir -p dist
+          cp ~/rpmbuild/RPMS/x86_64/libfprint-tod-goodix-55a2-${VER}-*.rpm dist/
+          cp ~/rpmbuild/SRPMS/*.src.rpm dist/
+          rpm -qlp dist/libfprint-tod-goodix-55a2-${VER}-*.x86_64.rpm
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rpm
+          path: dist/*.rpm
+
+  deb:
+    needs: version
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential devscripts debhelper pkgconf \
+            libfprint-2-tod-dev libgusb-dev libjson-glib-dev libglib2.0-dev
+      - name: Build DEB
+        run: |
+          dpkg-buildpackage -us -uc -b
+          mkdir -p dist
+          mv ../libfprint-tod-goodix-55a2_*.deb dist/
+          dpkg -c dist/*.deb
+      - uses: actions/upload-artifact@v4
+        with:
+          name: deb
+          path: dist/*.deb
+
+  release:
+    needs: [version, rpm, deb]
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true

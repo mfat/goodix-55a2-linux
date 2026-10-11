@@ -1,0 +1,30 @@
+Source: libfprint-tod-goodix-55a2
+Section: misc
+Priority: optional
+Maintainer: mFat <newmfat@gmail.com>
+Build-Depends: debhelper-compat (= 13),
+               pkgconf | pkg-config,
+               libfprint-2-tod-dev,
+               libgusb-dev,
+               libjson-glib-dev,
+               libglib2.0-dev
+Standards-Version: 4.6.2
+Homepage: https://github.com/mfat/goodix-55a2-linux
+Rules-Requires-Root: no
+
+Package: libfprint-tod-goodix-55a2
+Architecture: any
+Depends: ${shlibs:Depends},
+         ${misc:Depends},
+         libfprint-2-tod1,
+         fprintd,
+         python3,
+         python3-usb,
+         python3-numpy,
+         python3-opencv
+Description: Goodix 27c6:55a2 fingerprint reader support for fprintd
+ libfprint TOD driver and userspace bridge for the Goodix 27c6:55a2 USB
+ fingerprint reader. The bridge drives the sensor over USB and TLS-PSK and
+ matches touches with SIFT + RANSAC; fprintd uses it through the TOD module.
+ .
+ On first use the bridge overwrites the sensor's TLS pairing key (PSK).

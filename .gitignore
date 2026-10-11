@@ -1,3 +1,5 @@
 *.so
 *.o
 __pycache__/
+systemd/goodix55a2-bridge.service
+*.tar.gz

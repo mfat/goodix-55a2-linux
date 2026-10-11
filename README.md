@@ -54,32 +54,55 @@ Bridge protocol (one request per connection, line based):
   convenience feature, not a high-assurance biometric.
 - No warranty: see [LICENSE](LICENSE).
 
-## Requirements
+## Install
 
-- libfprint built with TOD support (`libfprint-tod`) and fprintd. On Fedora,
-  use the [grahamwhiteuk/libfprint-tod](https://copr.fedorainfracloud.org/coprs/grahamwhiteuk/libfprint-tod/)
-  COPR. Ubuntu ships `libfprint-2-tod1`.
-- Build: `gcc`, `pkg-config`, glib/gio headers, `libfprint-tod-devel`,
-  `libgusb-devel`, `json-glib-devel`.
-- Runtime: `python3`, `python3-pyusb`, `python3-numpy`, `python3-opencv`.
+All packages need **libfprint with TOD support** (`libfprint-tod`), which
+replaces the distro's plain libfprint.
 
-Fedora example:
+### Arch Linux (AUR)
+
+```sh
+yay -S libfprint-tod-goodix-55a2      # pulls libfprint-tod from the AUR
+sudo systemctl enable --now goodix55a2-bridge.service
+sudo systemctl restart fprintd.service
+```
+
+### Fedora
 
 ```sh
 sudo dnf copr enable grahamwhiteuk/libfprint-tod
-sudo dnf install libfprint-tod fprintd fprintd-pam \
-    gcc pkgconf glib2-devel libfprint-tod-devel libgusb-devel json-glib-devel \
-    python3-pyusb python3-numpy python3-opencv
+sudo dnf swap libfprint libfprint-tod
+sudo dnf install ./libfprint-tod-goodix-55a2-*.fc44.x86_64.rpm   # from GitHub Releases
 ```
 
-## Install
+### Debian / Ubuntu
+
+```sh
+sudo apt install ./libfprint-tod-goodix-55a2_*_amd64.deb         # from GitHub Releases
+```
+
+On Debian and Ubuntu, `libfprint-2-tod1` and `fprintd` come from the
+regular archive.
+
+### From source
+
+Build dependencies: `gcc`, `make`, `pkg-config`, glib/gio headers, and the
+libfprint-tod development files (`libfprint-tod-devel` on Fedora,
+`libfprint-2-tod-dev` on Debian/Ubuntu, included in `libfprint-tod` on Arch).
+Runtime dependencies: `python3`, pyusb, numpy, OpenCV (`cv2`).
 
 ```sh
 git clone https://github.com/mfat/goodix-55a2-linux
 cd goodix-55a2-linux
-./tod/build.sh
+make
 sudo ./install.sh
 ```
+
+Packagers: `make install DESTDIR=... LIBEXECDIR=...` installs the TOD module,
+the bridge, the systemd unit and the tmpfiles rule. See `packaging/` and
+`debian/`.
+
+## Usage
 
 Don't touch the sensor during the first enrollment's opening seconds: the
 bridge takes its calibration frame then.
@@ -97,12 +120,9 @@ rotation). If verification misses often, delete the print and enroll again.
 
 ## Uninstall
 
-```sh
-sudo ./uninstall.sh
-```
-
-This removes the driver, the service, the stored templates and the fprintd
-prints made with this driver. The PSK in the sensor stays as it is.
+Remove the package, or for a source install run `sudo ./uninstall.sh`. The
+script also deletes the stored templates and the fprintd prints made with this
+driver. The PSK in the sensor stays as it is.
 
 ## Troubleshooting
 
@@ -116,7 +136,7 @@ fprintd-list $USER                       # should list "Goodix 55a2 Fingerprint 
 - `unexpected firmware`: your reader runs firmware this project hasn't
   seen. Please open an issue with the firmware string from the log.
 - After a libfprint-tod update, rebuild and reinstall the module
-  (`./tod/build.sh && sudo ./install.sh`).
+  (`make clean && make && sudo ./install.sh`, or reinstall the package).
 
 ## Credits
 
