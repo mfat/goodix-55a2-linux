@@ -1,3 +1,10 @@
+libfprint-tod-goodix-55a2 (0.1.1) unstable; urgency=medium
+
+  * Patch the chip config with per-sensor OTP calibration like the Windows
+    driver.
+
+ -- mFat <newmfat@gmail.com>  Sun, 11 Oct 2026 20:30:00 +0330
+
 libfprint-tod-goodix-55a2 (0.1.0) unstable; urgency=medium
 
   * Initial release.

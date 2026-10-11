@@ -42,14 +42,16 @@ PSK_WHITE_BOX = bytes.fromhex(
     "60809b17b5316037b69bb2fa5d4c8ac31edb3394046ec06bbdacc57da6a756c5")
 PMK_HASH = bytes.fromhex("81b8ff490612022a121a9449ee3aad2792f32b9f3141182cd01019945ee50361")
 
-# Chip config captured from the Windows driver for 55a2.
-CONFIG = bytes.fromhex(
+# Default 55a2 chip config as shipped in the Goodix Windows driver (Wbdi.dll
+# 3.1.581.610). Per-sensor values are patched in from the OTP, see sensor_config().
+DEFAULT_CONFIG = bytes.fromhex(
     "301160712c9d2cc91ce518fd00fd00fd03ba000080ca0006008400beb28600c5b98800b5ad8a009d958c0000be8e"
     "0000c5900000b59200009d940000af960000bf980000b69a0000a7d2000000d4000000d6000000d8000000120003"
     "04d0000000700000007200785674003412200010402a0102002200012024003200800001045c0000015600304858"
     "00020032000802660000027c000038820080152a0182032200012024001400800001045c00000156000c24580005"
-    "0032000802660000027c000038820080162a0108005c008000540000016200380464001000660000027c0001382a"
-    "0108005c0000015200080054000001660000027c00013800e858")
+    "0032000802660000027c000038820080152a0108005c008000540000016200380464001000660000027c0001382a"
+    "0108005c0080005200080054000001660000027c00013800bad8")
+TAG_TCODE, TAG_DELTA_DOWN = 0x5C, 0x82
 FDT_MODE = bytes.fromhex("0d0180a08093809b80948090808f8094808b808a8083")
 
 W, H = 176, 56            # output image (columns x rows)
@@ -58,7 +60,7 @@ FINGER_OFF = 12.0
 POLL = 0.08
 
 F_MSG, F_TLS, F_TLS_DATA = 0xA0, 0xB0, 0xB2
-C_NOP, C_IMG, C_FDT_MODE, C_CONFIG, C_RESET = 0x00, 0x20, 0x36, 0x90, 0xA2
+C_NOP, C_IMG, C_FDT_MODE, C_CONFIG, C_RESET, C_OTP = 0x00, 0x20, 0x36, 0x90, 0xA2, 0xA6
 C_FW, C_ACK, C_DRV, C_TLS_REQ, C_PSK_W, C_PSK_R = 0xA8, 0xB0, 0xC4, 0xD0, 0xE0, 0xE4
 
 
@@ -83,6 +85,48 @@ def unproto(data, cmd):
     if data[0] != cmd or data[2 + length] != (0xAA - sum(data[:2 + length])) & 0xFF:
         raise IOError(f"bad reply for {cmd:#x}: {data[:8].hex()}")
     return data[3:2 + length]
+
+
+def otp_calibration(otp):
+    """tcode and FDT delta from the OTP, as in Wbdi.dll _MilanFSerGetTcodeAndDiffFromOtp."""
+    if len(otp) < 0x18:
+        return None
+    v = otp[0x16]
+    if v == 0 or v + otp[0x17] != 0xFF:
+        return None
+    tcode = ((v >> 4) + 1) << 4
+    diff = ((((v & 0xF) + 2) * 100 << 8) // tcode // 3) >> 4
+    return tcode, diff
+
+
+def config_entry(config, section, tag):
+    """Offset of a tag's value in a config section (entries are <tag, value> LE pairs)."""
+    base, size = config[1 + section * 2], config[2 + section * 2]
+    for e in range(base, base + size, 4):
+        if int.from_bytes(config[e:e + 2], "little") == tag:
+            return e + 2
+    raise ValueError(f"tag {tag:#x} not in section {section}")
+
+
+def config_fix_checksum(config):
+    s = 0xA5A5
+    for i in range(0, len(config) - 2, 2):
+        s = (s + int.from_bytes(config[i:i + 2], "little")) & 0xFFFF
+    config[-2:] = ((0x10000 - s) & 0xFFFF).to_bytes(2, "little")
+
+
+def sensor_config(otp):
+    """Patch the default config with this sensor's calibration, like the Windows driver."""
+    config = bytearray(DEFAULT_CONFIG)
+    cal = otp_calibration(otp)
+    if cal:
+        tcode, diff = cal
+        e = config_entry(config, 4, TAG_TCODE)
+        config[e:e + 2] = tcode.to_bytes(2, "little")
+        e = config_entry(config, 2, TAG_DELTA_DOWN)          # delta in the high byte
+        config[e + 1] = diff
+    config_fix_checksum(config)
+    return bytes(config), cal
 
 
 class Sensor:
@@ -154,8 +198,13 @@ class Sensor:
         r = self.cmd(C_RESET, bytes([0x05, 20]))
         if r[0] != 1:
             raise IOError("reset failed")
+        config, cal = sensor_config(self.cmd(C_OTP, b"\x00\x00"))
+        if cal:
+            log.info("OTP calibration: tcode %#x, fdt delta %#x", *cal)
+        else:
+            log.warning("OTP calibration missing or invalid, using default config")
         self._handshake()
-        if self.cmd(C_CONFIG, CONFIG)[0] != 1:
+        if self.cmd(C_CONFIG, config)[0] != 1:
             raise IOError("config upload failed")
         self.cmd(C_DRV, b"\x01\x00", reply=False)
         self.cmd(C_FDT_MODE, FDT_MODE)

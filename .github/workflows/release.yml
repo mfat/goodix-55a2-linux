@@ -16,6 +16,8 @@ jobs:
       version: ${{ steps.v.outputs.version }}
     steps:
       - uses: actions/checkout@v4
+      - name: Unit tests
+        run: python3 -m unittest discover -s tests -v
       - id: v
         run: |
           VERSION=$(cat VERSION)

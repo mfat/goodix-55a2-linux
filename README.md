@@ -138,6 +138,27 @@ fprintd-list $USER                       # should list "Goodix 55a2 Fingerprint 
 - After a libfprint-tod update, rebuild and reinstall the module
   (`make clean && make && sudo ./install.sh`, or reinstall the package).
 
+## Reverse-engineering notes
+
+- **Chip config:** the 55a2 config comes from the Goodix Windows driver
+  (`Wbdi.dll` 3.1.581.610, Lenovo package `3asi04af5za4ulb0.exe`; its INF covers
+  `27c6:5503`, `55a2` and `55a4`). It holds 8 sections of `<tag, value>` 16-bit LE
+  pairs (section table at bytes 1–16). The last 2 bytes are a checksum:
+  `0x10000 - (0xA5A5 + sum of 16-bit LE words)`.
+- **Per-sensor calibration:** Windows patches 2 config values from the sensor
+  OTP (`_MilanFSerGetTcodeAndDiffFromOtp`). The bridge does the same:
+
+  ```
+  v = otp[0x16]                         # valid if v != 0 and otp[0x16] + otp[0x17] == 0xFF
+  tcode = ((v >> 4) + 1) << 4           # -> tag 0x5c, section 4
+  diff  = ((((v & 0xF) + 2) * 100 << 8) // tcode // 3) >> 4   # -> high byte of tag 0x82, section 2
+  ```
+
+  `diff` is also the finger-detect (FDT) delta: thresholds are `(raw >> 1) + diff`.
+  `tests/test_config.py` checks that this reproduces a config captured from Windows.
+- **Image:** 12-bit pixels, 4 pixels per 6 bytes, 176×56 (two edge columns
+  likely don't image), followed by 4 trailing bytes.
+
 ## Credits
 
 - [goodix-fp-linux-dev/goodix-fp-dump](https://github.com/goodix-fp-linux-dev/goodix-fp-dump):
@@ -145,5 +166,7 @@ fprintd-list $USER                       # should list "Goodix 55a2 Fingerprint 
 - [tlambertz/goodix-fingerprint-reversing](https://github.com/tlambertz/goodix-fingerprint-reversing)
   ([blog post](https://blog.th0m.as/misc/fingerprint-reversing/)): 55a2 chip
   config, FDT format and image geometry.
+- [GuNanOvO/goodix-55x4-linux](https://github.com/GuNanOvO/goodix-55x4-linux):
+  notes on the Lenovo Windows driver package.
 - [libfprint](https://gitlab.freedesktop.org/libfprint/libfprint) and
   [libfprint-tod](https://gitlab.freedesktop.org/3v1n0/libfprint/-/tree/tod).

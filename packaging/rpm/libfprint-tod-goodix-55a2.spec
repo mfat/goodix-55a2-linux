@@ -1,7 +1,7 @@
 %undefine _debugsource_packages
 
 Name:           libfprint-tod-goodix-55a2
-Version:        0.1.0
+Version:        0.1.1
 Release:        1%{?dist}
 Summary:        Goodix 27c6:55a2 fingerprint reader support for fprintd
 
@@ -63,5 +63,8 @@ systemctl try-restart fprintd.service >/dev/null 2>&1 || :
 %{_tmpfilesdir}/goodix55a2.conf
 
 %changelog
+* Sun Oct 11 2026 mFat <newmfat@gmail.com> - 0.1.1-1
+- Patch the chip config with per-sensor OTP calibration like the Windows driver
+
 * Sun Oct 11 2026 mFat <newmfat@gmail.com> - 0.1.0-1
 - Initial package

@@ -1,7 +1,7 @@
 # Maintainer: mFat <newmfat@gmail.com>
 
 pkgname=libfprint-tod-goodix-55a2
-pkgver=0.1.0
+pkgver=0.1.1
 pkgrel=1
 pkgdesc='Goodix 27c6:55a2 fingerprint reader support for fprintd (libfprint TOD driver + bridge)'
 arch=('x86_64')
