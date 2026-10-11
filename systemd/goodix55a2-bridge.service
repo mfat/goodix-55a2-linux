@@ -1,0 +1,16 @@
+[Unit]
+Description=Goodix 27c6:55a2 fingerprint bridge for the goodix55a2 TOD driver
+After=systemd-tmpfiles-setup.service
+
+[Service]
+ExecStart=/usr/bin/python3 /usr/local/libexec/goodix55a2-bridge
+Restart=always
+RestartSec=2
+StateDirectory=goodix55a2
+StateDirectoryMode=0700
+ProtectHome=true
+PrivateTmp=true
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target
