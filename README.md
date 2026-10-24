@@ -27,6 +27,10 @@ fprintd ─ libfprint-tod ─ goodix55a2 TOD module ──(UNIX socket, root onl
 - The bridge only uses touches that start **after** the request (the finger has
   to be lifted first), so a touch can never be queued up and replayed later.
   Closing the connection cancels the request.
+- While a request waits for a finger the bridge lights the sensor's **status
+  LED** (command `0xae`, see the reverse-engineering notes) and blinks it, the
+  way the Windows driver does. `GOODIX_LED=on|blink|off` (default `blink`)
+  selects the behaviour; it is switched off again when the request ends.
 
 Bridge protocol (one request per connection, line based):
 
@@ -118,6 +122,11 @@ To use the fingerprint for login and sudo on Fedora:
 Tips: cover the whole finger pad during enrollment (center, edges, a little
 rotation). If verification misses often, delete the print and enroll again.
 
+The status LED blinks while the sensor waits for a finger. To keep it solidly
+on instead, or to turn it off, set `GOODIX_LED` in the service environment, e.g.
+`sudo systemctl edit goodix55a2-bridge` with `[Service]` /
+`Environment=GOODIX_LED=on`.
+
 ## Uninstall
 
 Remove the package, or for a source install run `sudo ./uninstall.sh`. The
@@ -158,6 +167,13 @@ fprintd-list $USER                       # should list "Goodix 55a2 Fingerprint 
   `tests/test_config.py` checks that this reproduces a config captured from Windows.
 - **Image:** 12-bit pixels, 4 pixels per 6 bytes, 176×56 (two edge columns
   likely don't image), followed by 4 trailing bytes.
+- **Status LED:** command `0xae`, which the community notes call
+  `QUERY_MCU_STATE` and therefore looks like a harmless status poll. It is a
+  switch: `0xae 000132` turns the LED on, `0xae 010032` turns it off (the two
+  payloads only swap their first two bytes). The reply is a plain `01 00`. The
+  Windows driver sends these in alternating pairs and lights the sensor while
+  it waits for a finger, which is why the LED never came on under an
+  open-source driver: nobody was sending the command.
 
 ## Credits
 
@@ -168,5 +184,7 @@ fprintd-list $USER                       # should list "Goodix 55a2 Fingerprint 
   config, FDT format and image geometry.
 - [GuNanOvO/goodix-55x4-linux](https://github.com/GuNanOvO/goodix-55x4-linux):
   notes on the Lenovo Windows driver package.
+- [Hydrogell/goodix-27c6-55a4-fingerprint-linux](https://github.com/Hydrogell/goodix-27c6-55a4-fingerprint-linux):
+  55a4 driver; its protocol notes identify `0xae` as the status LED switch.
 - [libfprint](https://gitlab.freedesktop.org/libfprint/libfprint) and
   [libfprint-tod](https://gitlab.freedesktop.org/3v1n0/libfprint/-/tree/tod).

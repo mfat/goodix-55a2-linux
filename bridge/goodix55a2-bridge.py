@@ -32,6 +32,7 @@ MATCH_INLIERS = 12        # genuine ~11-60 with a full template, impostor ~0-2
 DEBUG_DIR = os.environ.get("GOODIX_DEBUG_DIR")
 MIN_KEYPOINTS = 60        # below this a touch is too small/blurry to use
 IDLE_CLOSE = 30.0         # release the sensor after this many idle seconds
+LED_MODE = os.environ.get("GOODIX_LED", "blink").lower()  # blink (default), on, off
 RETRY_CENTER_FINGER = 2   # FpDeviceRetry codes
 RETRY_REMOVE_FINGER = 3
 
@@ -64,6 +65,9 @@ RECALIBRATE_AFTER = 5.0   # seconds of static frames without a lift before re-ba
 F_MSG, F_TLS, F_TLS_DATA = 0xA0, 0xB0, 0xB2
 C_NOP, C_IMG, C_FDT_MODE, C_CONFIG, C_RESET, C_OTP = 0x00, 0x20, 0x36, 0x90, 0xA2, 0xA6
 C_FW, C_ACK, C_DRV, C_TLS_REQ, C_PSK_W, C_PSK_R = 0xA8, 0xB0, 0xC4, 0xD0, 0xE0, 0xE4
+C_LED = 0xAE                                   # documented as QUERY_MCU_STATE, it is the LED switch
+LED_ON, LED_OFF = b"\x00\x01\x32", b"\x01\x00\x32"
+LED_BLINK = 0.7            # seconds per blink half-cycle while waiting for a finger
 
 
 def pack(payload, flags=F_MSG):
@@ -229,6 +233,10 @@ class Sensor:
         time.sleep(0.01)
         log.info("TLS established: %s", self.tls.cipher()[0])
 
+    def led(self, on):
+        """Switch the status LED. The reply is a plain 01 00, no state to keep."""
+        self.cmd(C_LED, LED_ON if on else LED_OFF)
+
     def image(self):
         rec = self.cmd(C_IMG, b"\x01\x00", flags=F_TLS_DATA)[9:]
         self.bin.write(rec)
@@ -337,6 +345,9 @@ class Bridge:
         self.sensor = None
         self.calib = None
         self.last_used = 0.0
+        self.led_on = False
+        self.led_t = 0.0
+        self.led_mode = LED_MODE
 
     # -- sensor session ---------------------------------------------------
     def ensure_sensor(self):
@@ -370,11 +381,34 @@ class Bridge:
 
     def release(self):
         if self.sensor:
+            self.led(False)
             try:
                 self.sensor.close()
             except Exception:
                 pass
         self.sensor = None
+
+    # -- status LED -------------------------------------------------------
+    def led(self, on):
+        """Switch the sensor LED, tracking its state so it never toggles needlessly."""
+        if self.led_mode == "off" or not self.sensor or on == self.led_on:
+            return
+        try:
+            self.sensor.led(on)
+            self.led_on = on
+            if on:
+                self.led_t = time.monotonic()
+        except Exception as e:
+            log.warning("LED switch failed (%s), disabling LED control", e)
+            self.led_mode = "off"
+
+    def blink(self):
+        """Blink while waiting for a finger, the way the Windows driver does."""
+        if self.led_mode != "blink":
+            return
+        if time.monotonic() - self.led_t >= LED_BLINK:
+            self.led_t = time.monotonic()
+            self.led(not self.led_on)
 
     def frame(self):
         img = self.sensor.image()
@@ -388,6 +422,7 @@ class Bridge:
             if peer_closed(conn):
                 raise Cancelled()
             img, e = self.frame()
+            self.blink()
             # Recover from a stale baseline: no lift seen, yet the frames are static.
             # A real finger is never this still for long; drop to the current frame.
             if prev is None or ridge_energy(img - prev) > STILL_MAX:
@@ -465,15 +500,19 @@ class Bridge:
             return
         log.info("request %s", words[0])
         self.ensure_sensor()
-        if words[0] == "ENROLL":
-            self.enroll(conn, max(1, min(int(words[1]), 30)) if len(words) > 1 else 10)
-        elif words[0] == "VERIFY" and len(words) == 2:
-            self.match(conn, words[1:], identify=False)
-        elif words[0] == "IDENTIFY":
-            self.match(conn, words[1:], identify=True)
-        else:
-            reply(conn, "ERROR unknown request")
-        self.save_calib()
+        self.led(True)           # on for the whole request, retries included
+        try:
+            if words[0] == "ENROLL":
+                self.enroll(conn, max(1, min(int(words[1]), 30)) if len(words) > 1 else 10)
+            elif words[0] == "VERIFY" and len(words) == 2:
+                self.match(conn, words[1:], identify=False)
+            elif words[0] == "IDENTIFY":
+                self.match(conn, words[1:], identify=True)
+            else:
+                reply(conn, "ERROR unknown request")
+        finally:
+            self.led(False)
+            self.save_calib()
 
     def run(self):
         os.makedirs(os.path.dirname(SOCK), mode=0o700, exist_ok=True)
