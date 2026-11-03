@@ -21,7 +21,7 @@
 #include "drivers_api.h"
 
 #define BRIDGE_SOCKET "/run/goodix55a2/bridge.sock"
-#define ENROLL_STAGES 10
+#define ENROLL_STAGES 20   /* the 56x176 sensor sees a small part of the finger */
 
 struct _FpiDeviceGoodix55a2
 {

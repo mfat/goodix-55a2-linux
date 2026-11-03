@@ -108,7 +108,7 @@ Don't touch the sensor during the first enrollment's opening seconds: the
 bridge takes its calibration frame then.
 
 ```sh
-fprintd-enroll          # 10 touches; lift fully, move slightly between touches
+fprintd-enroll          # 20 touches; lift fully, move slightly between touches
 fprintd-verify
 ```
 
