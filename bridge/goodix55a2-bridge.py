@@ -60,6 +60,10 @@ FINGER_OFF = 12.0
 POLL = 0.08
 STILL_MAX = 8.0           # frame-to-frame ridge energy of a static, empty sensor (~5)
 RECALIBRATE_AFTER = 5.0   # seconds of static frames without a lift before re-baselining
+REOPEN_TRIES = 5          # attempts to reopen a sensor lost mid-request (suspend/resume)
+SAME_PLACEMENT_MAX = 20.0 # ridge energy between two frames of one resting finger (moved: ~100)
+RESTING_MAX = 15.0        # after this long, a "resting finger" is treated as a stale baseline
+SETTLE_FRAMES = 12        # max frames to wait for the image to settle after opening
 
 F_MSG, F_TLS, F_TLS_DATA = 0xA0, 0xB0, 0xB2
 C_NOP, C_IMG, C_FDT_MODE, C_CONFIG, C_RESET, C_OTP = 0x00, 0x20, 0x36, 0x90, 0xA2, 0xA6
@@ -336,6 +340,9 @@ class Bridge:
         self.calib_path = os.path.join(STATE, "calib.npz")
         self.sensor = None
         self.calib = None
+        self.calib_confirmed = False  # baseline proven good by a match/enroll; only those are saved
+        self.last_capture = None      # raw frame of the last captured touch
+        self.reopened = False         # sensor reopened during the current request
         self.last_used = 0.0
 
     # -- sensor session ---------------------------------------------------
@@ -348,7 +355,7 @@ class Bridge:
         except Exception:
             self.release()
             raise
-        frame = self.sensor.image()
+        frame = self.settled_frame()
         stored = None
         try:
             with np.load(self.calib_path) as z:
@@ -361,9 +368,29 @@ class Bridge:
             self.calib = stored              # probably a finger on the sensor right now
         else:
             self.calib = frame
-        self.save_calib()
+        # Only confirmed baselines are ever saved, so a stored one is trusted (and so is a
+        # frame that agrees with it). Without one, the fresh frame has to prove itself
+        # with a match or an enrollment before it is saved.
+        self.calib_confirmed = stored is not None
+
+    def settled_frame(self):
+        """First frame after the image stops changing; the sensor needs a moment after open."""
+        prev = self.sensor.image()
+        for n in range(1, SETTLE_FRAMES):
+            frame = self.sensor.image()
+            if ridge_energy(frame - prev) < STILL_MAX:
+                if n > 1:
+                    log.info("image settled after %d frames", n + 1)
+                return frame
+            prev = frame
+        log.info("image did not settle after %d frames", SETTLE_FRAMES)
+        return prev
 
     def save_calib(self):
+        # A wrong baseline (a finger that rested too long, an unsettled frame) makes
+        # every later touch score 0, so never persist one that hasn't produced a match.
+        if not self.calib_confirmed:
+            return
         tmp = self.calib_path + ".tmp.npz"
         np.savez(tmp, calib=self.calib, config=np.frombuffer(self.sensor.config, np.uint8))
         os.replace(tmp, self.calib_path)
@@ -377,13 +404,36 @@ class Bridge:
         self.sensor = None
 
     def frame(self):
-        img = self.sensor.image()
+        try:
+            img = self.sensor.image()
+        except (OSError, ValueError, usb.core.USBError) as e:
+            # After suspend/resume the USB device was reset under us and the TLS
+            # session is gone. Reopen once per request instead of failing it.
+            if self.reopened:
+                raise
+            log.warning("sensor connection lost (%s), reopening", e)
+            self.reopened = True
+            self.release()
+            for attempt in range(REOPEN_TRIES):       # USB may still be re-enumerating
+                try:
+                    self.ensure_sensor()
+                    break
+                except (OSError, ValueError, usb.core.USBError):
+                    if attempt == REOPEN_TRIES - 1:
+                        raise
+                    time.sleep(0.5)
+            img = self.sensor.image()
         return img, ridge_energy(img - self.calib)
+
+    def same_placement(self, img):
+        """True if img shows the finger resting where the last touch was captured."""
+        return (self.last_capture is not None
+                and ridge_energy(img - self.last_capture) < SAME_PLACEMENT_MAX)
 
     def wait_touch(self, conn):
         """Wait for a finger that is placed after this call; return its 8-bit image."""
         lifted = False
-        prev, still_since = None, time.monotonic()
+        prev, still_since, start = None, time.monotonic(), time.monotonic()
         while True:
             if peer_closed(conn):
                 raise Cancelled()
@@ -393,11 +443,17 @@ class Bridge:
             if prev is None or ridge_energy(img - prev) > STILL_MAX:
                 still_since = time.monotonic()
             prev = img
-            if not lifted and time.monotonic() - still_since > RECALIBRATE_AFTER:
+            # A finger resting where it was just captured is static too (e.g. between
+            # enroll stages): wait for the lift instead of baselining on it.
+            if not lifted and time.monotonic() - still_since > RECALIBRATE_AFTER and not (
+                    self.same_placement(img) and time.monotonic() - start < RESTING_MAX):
                 log.info("static frames without a lift, recalibrating")
                 self.calib = img
-                self.save_calib()
-                e = 0.0
+                self.calib_confirmed = False
+                lifted = True
+                reply(conn, "FINGER 0")
+                time.sleep(POLL)
+                continue
             if e < FINGER_OFF:
                 if not lifted:
                     lifted = True
@@ -408,6 +464,7 @@ class Bridge:
                 time.sleep(0.05)                                   # let the finger settle
                 img, e = self.frame()
                 if e > FINGER_ON:
+                    self.last_capture = img
                     reply(conn, "FINGER 1")
                     u8 = to_u8(img - self.calib)
                     if DEBUG_DIR:
@@ -435,6 +492,7 @@ class Bridge:
             reply(conn, f"STAGE {len(feats)}")
         tid = secrets.token_hex(8)
         self.matcher.save(tid, feats)
+        self.calib_confirmed = True
         log.info("enrolled template %s", tid)
         reply(conn, f"DONE {tid}")
 
@@ -447,6 +505,7 @@ class Bridge:
         best = max(scores, key=scores.get, default=None)
         log.info("%s scores %s", "identify" if identify else "verify", scores)
         if best is not None and scores[best] >= MATCH_INLIERS:
+            self.calib_confirmed = True     # only a good baseline produces a match
             reply(conn, f"MATCH {best}" if identify else "MATCH")
         else:
             reply(conn, "NOMATCH")
@@ -464,6 +523,7 @@ class Bridge:
         if not words:
             return
         log.info("request %s", words[0])
+        self.reopened = False
         self.ensure_sensor()
         if words[0] == "ENROLL":
             self.enroll(conn, max(1, min(int(words[1]), 30)) if len(words) > 1 else 10)
