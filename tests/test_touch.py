@@ -1,4 +1,4 @@
-"""Touch detection: press-to-unlock, baseline safety and recovery from a lost sensor.
+"""Touch detection: baseline safety and recovery from a lost sensor.
 
 Run: python3 -m unittest discover -s tests
 Needs numpy (skipped otherwise); cv2 and pyusb are stubbed.
@@ -90,9 +90,10 @@ class TouchTest(unittest.TestCase):
         bridge = self.b.Bridge.__new__(self.b.Bridge)
         bridge.calib = empty()
         bridge.calib_path = pathlib.Path(self.tmp.name, "calib.npz").as_posix()
+        bridge.calib_confirmed = True
         bridge.last_capture = None
-        bridge.calib_suspect = False
         bridge.reopened = False
+        bridge.sensor = None
         self.bridge = bridge
         self.conn, self.peer = socket.socketpair()
 
@@ -101,11 +102,23 @@ class TouchTest(unittest.TestCase):
         self.peer.close()
         self.tmp.cleanup()
 
-    def run_touch(self, frames, accept_present):
+    def run_touch(self, frames):
         self.bridge.sensor = FakeSensor(frames, self.clock)
-        self.bridge.wait_touch(self.conn, accept_present)
+        self.bridge.wait_touch(self.conn)
         return self.bridge.sensor.read
 
+    def fake_matcher(self, score):
+        self.bridge.matcher = types.SimpleNamespace(
+            features=lambda u8: (np.zeros((100, 2), np.float32), np.zeros((100, 128), np.float32)),
+            score=lambda feat, tid: score)
+
+    def open_with(self, frames):
+        """ensure_sensor() with a fake sensor producing frames after open."""
+        self.b.Sensor = lambda: FakeSensor(frames, self.clock)
+        FakeSensor.open = lambda self_: None
+        self.bridge.ensure_sensor()
+
+    # -- energy model --------------------------------------------------------
     def test_energy_levels_are_realistic(self):
         e = self.b.ridge_energy
         self.assertLess(e(empty() - empty()), self.b.FINGER_OFF)
@@ -113,81 +126,73 @@ class TouchTest(unittest.TestCase):
         self.assertLess(e(finger() - finger()), self.b.SAME_PLACEMENT_MAX)
         self.assertGreater(e(finger(2) - finger()), self.b.SAME_PLACEMENT_MAX)
 
-    def test_enroll_requires_lift(self):
-        used = self.run_touch([finger(), finger(), empty(), finger(), finger()], accept_present=False)
+    # -- behaviour kept from upstream ----------------------------------------
+    def test_touch_requires_lift_first(self):
+        used = self.run_touch([finger(), finger(), empty(), finger(1), finger(1)])
         self.assertEqual(used, 5)
-
-    def test_match_accepts_finger_already_on_sensor(self):
-        used = self.run_touch([finger(), finger()], accept_present=True)
-        self.assertEqual(used, 2)                       # first frame + settle frame
-
-    def test_same_resting_finger_is_not_used_twice(self):
-        self.run_touch([finger(), finger()], accept_present=True)
-        used = self.run_touch([finger(), finger(), empty(), finger(1), finger(1)], accept_present=True)
-        self.assertEqual(used, 5)
-
-    def test_new_placement_after_capture_is_accepted_without_seen_lift(self):
-        # The lift happened between two requests (sensor not polled): a finger in a
-        # different position must count at once. This is the real-world unlock case.
-        self.run_touch([finger(), finger()], accept_present=True)
-        used = self.run_touch([finger(2), finger(2)], accept_present=True)
-        self.assertEqual(used, 2)
-
-    def test_resting_finger_does_not_become_the_baseline(self):
-        # Finger left on the sensor after a capture for > RECALIBRATE_AFTER.
-        self.run_touch([finger(), finger()], accept_present=True)
-        resting = [finger()] * 16                       # 8 s at 0.5 s/frame
-        self.run_touch(resting + [empty(), finger(1), finger(1)], accept_present=True)
-        self.assertTrue(np.array_equal(self.bridge.calib, empty()))
-        self.assertFalse(self.bridge.calib_suspect)
 
     def test_stale_baseline_still_recovers(self):
-        self.bridge.calib = finger()                    # poisoned baseline, no finger present
-        frames = [empty()] * 14 + [finger(1), finger(1)]
-        self.run_touch(frames, accept_present=False)
+        self.bridge.calib = finger()                    # bad baseline, no finger present
+        self.run_touch([empty()] * 14 + [finger(1), finger(1)])
         self.assertTrue(np.array_equal(self.bridge.calib, empty()))
 
-    def test_recalibrated_baseline_is_not_saved_until_confirmed(self):
+    # -- resting finger never becomes the baseline ---------------------------
+    def test_resting_finger_does_not_become_the_baseline(self):
+        self.run_touch([empty(), finger(), finger()])
+        self.run_touch([finger()] * 16 + [empty(), finger(1), finger(1)])   # 8 s resting
+        self.assertTrue(np.array_equal(self.bridge.calib, empty()))
+        self.assertTrue(self.bridge.calib_confirmed)
+
+    # -- only confirmed baselines are saved -----------------------------------
+    def test_unconfirmed_baseline_is_not_saved(self):
         self.bridge.sensor = FakeSensor([], self.clock)
-        self.bridge.calib_suspect = True
+        self.bridge.calib_confirmed = False
         self.bridge.save_calib()
         self.assertFalse(pathlib.Path(self.bridge.calib_path).exists())
-        self.bridge.calib_suspect = False
+        self.bridge.calib_confirmed = True
         self.bridge.save_calib()
         self.assertTrue(pathlib.Path(self.bridge.calib_path).exists())
 
-    def fake_matcher(self, score):
-        self.bridge.matcher = types.SimpleNamespace(
-            features=lambda u8: (np.zeros((100, 2), np.float32), np.zeros((100, 128), np.float32)),
-            score=lambda feat, tid: score)
-
-    def test_recalibrated_baseline_confirmed_only_by_match(self):
-        self.bridge.calib = finger()                    # poisoned baseline, no finger present
-        self.run_touch([empty()] * 14 + [finger(1), finger(1)], accept_present=False)
-        self.assertTrue(self.bridge.calib_suspect)      # frames after a re-take prove nothing
+    def test_recalibration_is_unconfirmed_until_a_match(self):
+        self.bridge.calib = finger()
+        self.run_touch([empty()] * 14 + [finger(1), finger(1)])
+        self.assertFalse(self.bridge.calib_confirmed)
         self.fake_matcher(score=3)
         self.bridge.sensor = FakeSensor([empty(), finger(2), finger(2)], self.clock)
         self.bridge.match(self.conn, ["t1"], identify=False)
-        self.assertTrue(self.bridge.calib_suspect)      # NOMATCH: still unconfirmed
+        self.assertFalse(self.bridge.calib_confirmed)    # NOMATCH proves nothing
         self.fake_matcher(score=40)
         self.bridge.sensor = FakeSensor([empty(), finger(3), finger(3)], self.clock)
         self.bridge.match(self.conn, ["t1"], identify=False)
-        self.assertFalse(self.bridge.calib_suspect)     # MATCH confirms it
-        self.assertIn(b"NOMATCH", self.peer.recv(4096))
+        self.assertTrue(self.bridge.calib_confirmed)     # MATCH confirms it
 
-    def test_no_accept_present_while_baseline_suspect(self):
-        self.bridge.calib_suspect = True
-        used = self.run_touch([finger(), finger(), empty(), finger(1), finger(1)], accept_present=True)
-        self.assertEqual(used, 5)
+    def test_fresh_baseline_after_open_is_unconfirmed(self):
+        self.open_with([empty(), empty()])               # no calib.npz on disk
+        self.assertFalse(self.bridge.calib_confirmed)
+        self.assertFalse(pathlib.Path(self.bridge.calib_path).exists())
 
+    def test_stored_baseline_is_trusted(self):
+        self.bridge.sensor = types.SimpleNamespace(config=b"cfg")
+        self.bridge.calib = empty()
+        self.bridge.save_calib()
+        self.bridge.sensor = None
+        self.open_with([empty(), empty()])
+        self.assertTrue(self.bridge.calib_confirmed)
+
+    def test_baseline_waits_for_image_to_settle(self):
+        warm = [finger(i) for i in range(3)]             # changing frames right after open
+        self.open_with(warm + [empty(), empty()])
+        self.assertTrue(np.array_equal(self.bridge.calib, empty()))
+
+    # -- suspend/resume ------------------------------------------------------
     def test_reopens_sensor_lost_mid_request(self):
-        reopened = FakeSensor([finger(), finger()], self.clock)
+        reopened = FakeSensor([empty(), finger(), finger()], self.clock)
 
         def ensure():
             self.bridge.sensor = reopened
         self.bridge.ensure_sensor = ensure
         self.bridge.sensor = FakeSensor([USBError("No such device (it may have been disconnected)")], self.clock)
-        self.bridge.wait_touch(self.conn, accept_present=True)
+        self.bridge.wait_touch(self.conn)
         self.assertIs(self.bridge.sensor, reopened)
 
     def test_second_loss_in_same_request_fails(self):
@@ -196,7 +201,7 @@ class TouchTest(unittest.TestCase):
         self.bridge.ensure_sensor = ensure
         self.bridge.sensor = FakeSensor([USBError("gone")], self.clock)
         with self.assertRaises(USBError):
-            self.bridge.wait_touch(self.conn, accept_present=True)
+            self.bridge.wait_touch(self.conn)
 
     def test_reopen_retries_while_usb_reenumerates(self):
         calls = []
@@ -205,10 +210,10 @@ class TouchTest(unittest.TestCase):
             calls.append(1)
             if len(calls) < 3:
                 raise USBError("sensor not found")
-            self.bridge.sensor = FakeSensor([finger(), finger()], self.clock)
+            self.bridge.sensor = FakeSensor([empty(), finger(), finger()], self.clock)
         self.bridge.ensure_sensor = ensure
         self.bridge.sensor = FakeSensor([USBError("gone")], self.clock)
-        self.bridge.wait_touch(self.conn, accept_present=True)
+        self.bridge.wait_touch(self.conn)
         self.assertEqual(len(calls), 3)
 
 

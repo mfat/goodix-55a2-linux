@@ -3,8 +3,8 @@
  *
  * The sensor itself is driven by goodix55a2-bridge (USB + TLS + matching).
  * For every enroll/verify/identify this driver opens a fresh connection to the
- * bridge socket and sends one request line. Each placement of the finger is used
- * for at most one capture (see the bridge), so nothing can be queued or replayed.
+ * bridge socket and sends one request line; the bridge only answers with touches
+ * that happen after the request, so nothing can be queued or replayed.
  *
  * Bridge replies (one per line):
  *   FINGER <0|1>   finger status change

@@ -9,13 +9,8 @@ fprintd sends one request per connection on a root-only UNIX socket:
   VERIFY <id>          -> MATCH | NOMATCH | RETRY <code>
   IDENTIFY <id> ...    -> MATCH <id> | NOMATCH | RETRY <code>
 
-Enroll only uses touches that start after the request (the finger must be
-lifted first). Verify/identify also take a finger that is already resting on
-the sensor when the request arrives, so one press of a power-button sensor
-both wakes the screen and unlocks. Either way each placement of the finger is
-used at most once: a finger still resting where it was last captured must be
-lifted before it counts again, so nothing can be queued or replayed. Closing
-the connection cancels.
+Only touches that start after the request are used (the finger must be lifted
+first), so nothing can be queued or replayed. Closing the connection cancels.
 
 Protocol/config derived from goodix-fp-dump and th0m.as' 55a2 reversing work.
 """
@@ -68,6 +63,7 @@ RECALIBRATE_AFTER = 5.0   # seconds of static frames without a lift before re-ba
 REOPEN_TRIES = 5          # attempts to reopen a sensor lost mid-request (suspend/resume)
 SAME_PLACEMENT_MAX = 20.0 # ridge energy between two frames of one resting finger (moved: ~100)
 RESTING_MAX = 15.0        # after this long, a "resting finger" is treated as a stale baseline
+SETTLE_FRAMES = 12        # max frames to wait for the image to settle after opening
 
 F_MSG, F_TLS, F_TLS_DATA = 0xA0, 0xB0, 0xB2
 C_NOP, C_IMG, C_FDT_MODE, C_CONFIG, C_RESET, C_OTP = 0x00, 0x20, 0x36, 0x90, 0xA2, 0xA6
@@ -344,10 +340,10 @@ class Bridge:
         self.calib_path = os.path.join(STATE, "calib.npz")
         self.sensor = None
         self.calib = None
+        self.calib_confirmed = False  # baseline proven good by a match/enroll; only those are saved
+        self.last_capture = None      # raw frame of the last captured touch
+        self.reopened = False         # sensor reopened during the current request
         self.last_used = 0.0
-        self.last_capture = None  # raw frame of the last captured touch
-        self.calib_suspect = False  # baseline re-taken from static frames; confirmed by a match
-        self.reopened = False     # sensor reopened during the current request
 
     # -- sensor session ---------------------------------------------------
     def ensure_sensor(self):
@@ -359,7 +355,7 @@ class Bridge:
         except Exception:
             self.release()
             raise
-        frame = self.sensor.image()
+        frame = self.settled_frame()
         stored = None
         try:
             with np.load(self.calib_path) as z:
@@ -372,12 +368,28 @@ class Bridge:
             self.calib = stored              # probably a finger on the sensor right now
         else:
             self.calib = frame
-        self.save_calib()
+        # Only confirmed baselines are ever saved, so a stored one is trusted (and so is a
+        # frame that agrees with it). Without one, the fresh frame has to prove itself
+        # with a match or an enrollment before it is saved.
+        self.calib_confirmed = stored is not None
+
+    def settled_frame(self):
+        """First frame after the image stops changing; the sensor needs a moment after open."""
+        prev = self.sensor.image()
+        for n in range(1, SETTLE_FRAMES):
+            frame = self.sensor.image()
+            if ridge_energy(frame - prev) < STILL_MAX:
+                if n > 1:
+                    log.info("image settled after %d frames", n + 1)
+                return frame
+            prev = frame
+        log.info("image did not settle after %d frames", SETTLE_FRAMES)
+        return prev
 
     def save_calib(self):
-        # A baseline re-taken from static frames may be a finger that rested too long;
-        # keep it in memory only until a successful match (or enroll) confirms it.
-        if self.calib_suspect:
+        # A wrong baseline (a finger that rested too long, an unsettled frame) makes
+        # every later touch score 0, so never persist one that hasn't produced a match.
+        if not self.calib_confirmed:
             return
         tmp = self.calib_path + ".tmp.npz"
         np.savez(tmp, calib=self.calib, config=np.frombuffer(self.sensor.config, np.uint8))
@@ -418,42 +430,30 @@ class Bridge:
         return (self.last_capture is not None
                 and ridge_energy(img - self.last_capture) < SAME_PLACEMENT_MAX)
 
-    def wait_touch(self, conn, accept_present=False):
-        """Wait for a touch and return its 8-bit image.
-
-        By default the finger must be placed after this call. With accept_present a
-        finger already on the sensor counts too, unless it is still resting where the
-        last touch was captured (then it must be lifted first).
-        """
+    def wait_touch(self, conn):
+        """Wait for a finger that is placed after this call; return its 8-bit image."""
         lifted = False
         prev, still_since, start = None, time.monotonic(), time.monotonic()
-        first = True
         while True:
             if peer_closed(conn):
                 raise Cancelled()
             img, e = self.frame()
-            if first:
-                first = False
-                if (accept_present and not self.calib_suspect and e > FINGER_ON
-                        and not self.same_placement(img)):
-                    lifted = True                                  # new press: take it
             # Recover from a stale baseline: no lift seen, yet the frames are static.
-            # A finger resting where it was just captured is static too: wait for the
-            # lift instead of baselining on it (unless it stays there implausibly long).
+            # A real finger is never this still for long; drop to the current frame.
             if prev is None or ridge_energy(img - prev) > STILL_MAX:
                 still_since = time.monotonic()
             prev = img
-            if not lifted and time.monotonic() - still_since > RECALIBRATE_AFTER:
-                if self.same_placement(img) and time.monotonic() - start < RESTING_MAX:
-                    pass
-                else:
-                    log.info("static frames without a lift, recalibrating")
-                    self.calib = img
-                    self.calib_suspect = True
-                    lifted = True
-                    reply(conn, "FINGER 0")
-                    time.sleep(POLL)
-                    continue
+            # A finger resting where it was just captured is static too (e.g. between
+            # enroll stages): wait for the lift instead of baselining on it.
+            if not lifted and time.monotonic() - still_since > RECALIBRATE_AFTER and not (
+                    self.same_placement(img) and time.monotonic() - start < RESTING_MAX):
+                log.info("static frames without a lift, recalibrating")
+                self.calib = img
+                self.calib_confirmed = False
+                lifted = True
+                reply(conn, "FINGER 0")
+                time.sleep(POLL)
+                continue
             if e < FINGER_OFF:
                 if not lifted:
                     lifted = True
@@ -472,9 +472,9 @@ class Bridge:
                     return u8
             time.sleep(POLL)
 
-    def touch_features(self, conn, accept_present=False):
+    def touch_features(self, conn):
         """Return features of a usable touch, or None after asking for a retry."""
-        feat = self.matcher.features(self.wait_touch(conn, accept_present))
+        feat = self.matcher.features(self.wait_touch(conn))
         if len(feat[0]) < MIN_KEYPOINTS:
             log.info("touch too small (%d keypoints)", len(feat[0]))
             return None
@@ -492,12 +492,12 @@ class Bridge:
             reply(conn, f"STAGE {len(feats)}")
         tid = secrets.token_hex(8)
         self.matcher.save(tid, feats)
-        self.calib_suspect = False
+        self.calib_confirmed = True
         log.info("enrolled template %s", tid)
         reply(conn, f"DONE {tid}")
 
     def match(self, conn, ids, identify):
-        f = self.touch_features(conn, accept_present=True)
+        f = self.touch_features(conn)
         if f is None:
             reply(conn, f"RETRY {RETRY_CENTER_FINGER}")
             return
@@ -505,7 +505,7 @@ class Bridge:
         best = max(scores, key=scores.get, default=None)
         log.info("%s scores %s", "identify" if identify else "verify", scores)
         if best is not None and scores[best] >= MATCH_INLIERS:
-            self.calib_suspect = False      # only a good baseline produces a match
+            self.calib_confirmed = True     # only a good baseline produces a match
             reply(conn, f"MATCH {best}" if identify else "MATCH")
         else:
             reply(conn, "NOMATCH")
