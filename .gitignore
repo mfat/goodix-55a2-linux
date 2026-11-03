@@ -3,3 +3,5 @@
 __pycache__/
 systemd/goodix55a2-bridge.service
 *.tar.gz
+selinux/*.mod
+selinux/*.pp

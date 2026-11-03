@@ -1,0 +1,38 @@
+# SELinux policy for the goodix55a2 bridge socket (Fedora / RHEL, targeted policy).
+#
+# fprintd runs confined as fprintd_t and may not talk to a socket in a generic
+# /run directory (var_run_t), so without this every enroll/verify fails with
+# "Could not connect: Permission denied". This module gives /run/goodix55a2 its
+# own type and lets fprintd reach only that socket.
+#
+# Build:  make selinux        (needs checkpolicy)
+module goodix55a2 1.1;
+
+require {
+    type fprintd_t;
+    type unconfined_service_t;
+    type systemd_tmpfiles_t;
+    type tmpfs_t;
+    type var_run_t;
+    attribute file_type;
+    class dir { getattr search open read write add_name remove_name create setattr relabelfrom relabelto rmdir };
+    class sock_file { getattr write };
+    class unix_stream_socket connectto;
+    class filesystem associate;
+}
+
+# Label for /run/goodix55a2 and the bridge socket inside it
+type goodix55a2_run_t;
+typeattribute goodix55a2_run_t file_type;
+allow goodix55a2_run_t tmpfs_t:filesystem associate;
+
+# At boot, systemd-tmpfiles creates /run/goodix55a2 with this label
+allow systemd_tmpfiles_t goodix55a2_run_t:dir { create getattr setattr open read search write add_name remove_name relabelfrom relabelto rmdir };
+
+# If the bridge creates the directory itself, it still gets the right label
+type_transition unconfined_service_t var_run_t:dir goodix55a2_run_t "goodix55a2";
+
+# fprintd may reach only this socket, and talk to the bridge process behind it
+allow fprintd_t goodix55a2_run_t:dir { getattr search };
+allow fprintd_t goodix55a2_run_t:sock_file { getattr write };
+allow fprintd_t unconfined_service_t:unix_stream_socket connectto;

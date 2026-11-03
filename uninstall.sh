@@ -4,6 +4,7 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 systemctl disable --now goodix55a2-bridge.service || true
+[ -x /usr/libexec/goodix55a2-selinux ] && /usr/libexec/goodix55a2-selinux remove || true
 make uninstall TOD_CFLAGS= TOD_LIBS=
 rm -rf /run/goodix55a2 /var/lib/goodix55a2 /var/lib/fprint/*/goodix55a2
 systemctl daemon-reload

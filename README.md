@@ -75,6 +75,10 @@ sudo dnf swap libfprint libfprint-tod
 sudo dnf install ./libfprint-tod-goodix-55a2-*.fc44.x86_64.rpm   # from GitHub Releases
 ```
 
+The RPM also installs a small SELinux module (`selinux/goodix55a2.te`). fprintd
+runs confined on Fedora and is otherwise not allowed to connect to the bridge
+socket, so enrolling fails with `enroll-unknown-error`.
+
 ### Debian / Ubuntu
 
 ```sh
@@ -89,6 +93,8 @@ regular archive.
 Build dependencies: `gcc`, `make`, `pkg-config`, glib/gio headers, and the
 libfprint-tod development files (`libfprint-tod-devel` on Fedora,
 `libfprint-2-tod-dev` on Debian/Ubuntu, included in `libfprint-tod` on Arch).
+With SELinux enabled (Fedora/RHEL) also `checkpolicy`; `install.sh` then builds
+and loads the SELinux module.
 Runtime dependencies: `python3`, pyusb, numpy, OpenCV (`cv2`).
 
 ```sh
@@ -99,7 +105,9 @@ sudo ./install.sh
 ```
 
 Packagers: `make install DESTDIR=... LIBEXECDIR=...` installs the TOD module,
-the bridge, the systemd unit and the tmpfiles rule. See `packaging/` and
+the bridge, the systemd unit and the tmpfiles rule. On SELinux distributions,
+`make selinux install-selinux` adds the policy module and
+`goodix55a2-selinux install|remove` loads/unloads it (see the RPM spec). See `packaging/` and
 `debian/`.
 
 ## Usage
@@ -133,6 +141,11 @@ fprintd-list $USER                       # should list "Goodix 55a2 Fingerprint 
 
 - `goodix55a2-bridge unavailable`: the service isn't running. Check
   `systemctl status goodix55a2-bridge`.
+- `goodix55a2-bridge unavailable: Could not connect: Permission denied` (fprintd
+  log) on Fedora: SELinux is blocking fprintd. Check
+  `sudo ls -Z /run/goodix55a2` shows `goodix55a2_run_t`; if not, run
+  `sudo /usr/libexec/goodix55a2-selinux install /usr/share/selinux/packages/goodix55a2.pp`
+  and restart the bridge.
 - `unexpected firmware`: your reader runs firmware this project hasn't
   seen. Please open an issue with the firmware string from the log.
 - After a libfprint-tod update, rebuild and reinstall the module
