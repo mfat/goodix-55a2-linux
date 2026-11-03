@@ -14,6 +14,7 @@ BuildRequires:  make
 BuildRequires:  pkgconfig(libfprint-2-tod-1)
 BuildRequires:  pkgconfig(gio-unix-2.0)
 BuildRequires:  systemd-rpm-macros
+BuildRequires:  checkpolicy
 
 # libfprint-tod comes from the grahamwhiteuk/libfprint-tod COPR
 Requires:       libfprint-tod
@@ -23,6 +24,10 @@ Requires:       python3-pyusb
 Requires:       python3-numpy
 Requires:       python3-opencv
 %{?systemd_requires}
+Requires(post): policycoreutils
+Requires(post): policycoreutils-python-utils
+Requires(postun): policycoreutils
+Requires(postun): policycoreutils-python-utils
 
 %description
 libfprint TOD driver and userspace bridge for the Goodix 27c6:55a2 USB
@@ -36,11 +41,15 @@ On first use the bridge overwrites the sensor's TLS pairing key (PSK).
 
 %build
 %make_build LIBEXECDIR=%{_libexecdir}
+make selinux
 
 %install
 %make_install LIBEXECDIR=%{_libexecdir} UNITDIR=%{_unitdir} TMPFILESDIR=%{_tmpfilesdir}
+make install-selinux DESTDIR=%{buildroot} LIBEXECDIR=%{_libexecdir} SELINUXDIR=%{_datadir}/selinux/packages
 
 %post
+# fprintd is SELinux-confined: load the policy before the bridge creates its socket
+%{_libexecdir}/goodix55a2-selinux install %{_datadir}/selinux/packages/goodix55a2.pp || :
 %systemd_post goodix55a2-bridge.service
 %tmpfiles_create goodix55a2.conf
 if [ $1 -eq 1 ]; then
@@ -50,6 +59,9 @@ systemctl try-restart fprintd.service >/dev/null 2>&1 || :
 
 %preun
 %systemd_preun goodix55a2-bridge.service
+if [ $1 -eq 0 ]; then
+    %{_libexecdir}/goodix55a2-selinux remove || :
+fi
 
 %postun
 %systemd_postun_with_restart goodix55a2-bridge.service
@@ -61,6 +73,8 @@ systemctl try-restart fprintd.service >/dev/null 2>&1 || :
 %{_libexecdir}/goodix55a2-bridge
 %{_unitdir}/goodix55a2-bridge.service
 %{_tmpfilesdir}/goodix55a2.conf
+%{_libexecdir}/goodix55a2-selinux
+%{_datadir}/selinux/packages/goodix55a2.pp
 
 %changelog
 * Sun Oct 11 2026 mFat <newmfat@gmail.com> - 0.1.2-1
