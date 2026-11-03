@@ -118,6 +118,12 @@ To use the fingerprint for login and sudo on Fedora:
 Tips: cover the whole finger pad during enrollment (center, edges, a little
 rotation). If verification misses often, delete the print and enroll again.
 
+On laptops where the sensor is in the power button, a press that wakes the
+screen also unlocks: verify/identify accept a finger that is already on the
+sensor (once per placement). For this the power button action should not be
+"sleep" (KDE: System Settings → Power Management → "When power button
+pressed"). After suspend/resume the bridge reconnects to the sensor on its own.
+
 ## Uninstall
 
 Remove the package, or for a source install run `sudo ./uninstall.sh`. The

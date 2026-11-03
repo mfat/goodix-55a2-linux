@@ -9,8 +9,12 @@ fprintd sends one request per connection on a root-only UNIX socket:
   VERIFY <id>          -> MATCH | NOMATCH | RETRY <code>
   IDENTIFY <id> ...    -> MATCH <id> | NOMATCH | RETRY <code>
 
-Only touches that start after the request are used (the finger must be lifted
-first), so nothing can be queued or replayed. Closing the connection cancels.
+Enroll only uses touches that start after the request (the finger must be
+lifted first). Verify/identify also take a finger that is already resting on
+the sensor when the request arrives, so one press of a power-button sensor
+both wakes the screen and unlocks. Either way each placement of the finger is
+used at most once: after a capture it must be lifted before another touch
+counts, so nothing can be queued or replayed. Closing the connection cancels.
 
 Protocol/config derived from goodix-fp-dump and th0m.as' 55a2 reversing work.
 """
@@ -60,6 +64,7 @@ FINGER_OFF = 12.0
 POLL = 0.08
 STILL_MAX = 8.0           # frame-to-frame ridge energy of a static, empty sensor (~5)
 RECALIBRATE_AFTER = 5.0   # seconds of static frames without a lift before re-baselining
+REOPEN_TRIES = 5          # attempts to reopen a sensor lost mid-request (suspend/resume)
 
 F_MSG, F_TLS, F_TLS_DATA = 0xA0, 0xB0, 0xB2
 C_NOP, C_IMG, C_FDT_MODE, C_CONFIG, C_RESET, C_OTP = 0x00, 0x20, 0x36, 0x90, 0xA2, 0xA6
@@ -337,6 +342,8 @@ class Bridge:
         self.sensor = None
         self.calib = None
         self.last_used = 0.0
+        self.consumed = False     # the finger now on the sensor was already captured
+        self.reopened = False     # sensor reopened during the current request
 
     # -- sensor session ---------------------------------------------------
     def ensure_sensor(self):
@@ -369,6 +376,7 @@ class Bridge:
         os.replace(tmp, self.calib_path)
 
     def release(self):
+        self.consumed = False     # lifts can't be seen while the sensor is closed
         if self.sensor:
             try:
                 self.sensor.close()
@@ -377,12 +385,35 @@ class Bridge:
         self.sensor = None
 
     def frame(self):
-        img = self.sensor.image()
+        try:
+            img = self.sensor.image()
+        except (OSError, ValueError, usb.core.USBError) as e:
+            # After suspend/resume the USB device was reset under us and the TLS
+            # session is gone. Reopen once per request instead of failing it.
+            if self.reopened:
+                raise
+            log.warning("sensor connection lost (%s), reopening", e)
+            self.reopened = True
+            self.release()
+            for attempt in range(REOPEN_TRIES):       # USB may still be re-enumerating
+                try:
+                    self.ensure_sensor()
+                    break
+                except (OSError, ValueError, usb.core.USBError):
+                    if attempt == REOPEN_TRIES - 1:
+                        raise
+                    time.sleep(0.5)
+            img = self.sensor.image()
         return img, ridge_energy(img - self.calib)
 
-    def wait_touch(self, conn):
-        """Wait for a finger that is placed after this call; return its 8-bit image."""
-        lifted = False
+    def wait_touch(self, conn, accept_present=False):
+        """Wait for a touch and return its 8-bit image.
+
+        By default the finger must be placed after this call. With accept_present a
+        finger already resting on the sensor counts too, unless it was captured before
+        and hasn't been lifted since.
+        """
+        lifted = accept_present and not self.consumed
         prev, still_since = None, time.monotonic()
         while True:
             if peer_closed(conn):
@@ -399,6 +430,7 @@ class Bridge:
                 self.save_calib()
                 e = 0.0
             if e < FINGER_OFF:
+                self.consumed = False
                 if not lifted:
                     lifted = True
                     reply(conn, "FINGER 0")
@@ -408,6 +440,7 @@ class Bridge:
                 time.sleep(0.05)                                   # let the finger settle
                 img, e = self.frame()
                 if e > FINGER_ON:
+                    self.consumed = True
                     reply(conn, "FINGER 1")
                     u8 = to_u8(img - self.calib)
                     if DEBUG_DIR:
@@ -415,9 +448,9 @@ class Bridge:
                     return u8
             time.sleep(POLL)
 
-    def touch_features(self, conn):
+    def touch_features(self, conn, accept_present=False):
         """Return features of a usable touch, or None after asking for a retry."""
-        feat = self.matcher.features(self.wait_touch(conn))
+        feat = self.matcher.features(self.wait_touch(conn, accept_present))
         if len(feat[0]) < MIN_KEYPOINTS:
             log.info("touch too small (%d keypoints)", len(feat[0]))
             return None
@@ -439,7 +472,7 @@ class Bridge:
         reply(conn, f"DONE {tid}")
 
     def match(self, conn, ids, identify):
-        f = self.touch_features(conn)
+        f = self.touch_features(conn, accept_present=True)
         if f is None:
             reply(conn, f"RETRY {RETRY_CENTER_FINGER}")
             return
@@ -464,6 +497,7 @@ class Bridge:
         if not words:
             return
         log.info("request %s", words[0])
+        self.reopened = False
         self.ensure_sensor()
         if words[0] == "ENROLL":
             self.enroll(conn, max(1, min(int(words[1]), 30)) if len(words) > 1 else 10)
